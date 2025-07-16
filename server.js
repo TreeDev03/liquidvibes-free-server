@@ -1,5 +1,5 @@
-// 🆓 FREE LIQUIDVIBES FULFILLMENT SERVER
-// Optimized for Render.com free tier
+// 🆓 FREE LIQUIDVIBES FULFILLMENT SERVER - FIXED VERSION
+// Save this as: server.js
 
 const express = require('express');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
@@ -19,8 +19,8 @@ setInterval(() => {
   console.log('🔄 Keeping server active...');
 }, 14 * 60 * 1000); // Every 14 minutes
 
-// Email transporter (same as before)
-const transporter = nodemailer.createTransporter({
+// Email transporter (FIXED: createTransport not createTransporter)
+const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: process.env.GMAIL_USER,
@@ -37,7 +37,7 @@ app.get('/', (req, res) => {
   });
 });
 
-// Webhook endpoint (same logic as before)
+// Webhook endpoint
 app.post('/webhook', async (request, response) => {
   const sig = request.headers['stripe-signature'];
   let event;
@@ -62,7 +62,7 @@ app.post('/webhook', async (request, response) => {
   response.status(200).send('Received');
 });
 
-// Same fulfillment logic as the paid version
+// Order fulfillment logic
 async function fulfillOrder(session) {
   try {
     const customerEmail = session.customer_details.email;
@@ -206,7 +206,7 @@ function getProductInfo(amountInCents) {
   return products[amountInCents];
 }
 
-// Email template (same professional email as paid version)
+// Email template
 async function sendFulfillmentEmail(email, name, productInfo, orderId) {
   const downloadLinksHtml = productInfo.downloads.map(download => `
     <tr>
