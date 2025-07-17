@@ -24,7 +24,7 @@ setInterval(() => {
 }, 14 * 60 * 1000);
 
 // Email transporter
-const transporter = nodemailer.createTransporter({
+const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: process.env.GMAIL_USER,
