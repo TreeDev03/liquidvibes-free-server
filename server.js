@@ -1,5 +1,5 @@
-// 🆓 FREE LIQUIDVIBES FULFILLMENT SERVER - FIXED VERSION
-// Save this as: server.js
+// 🆓 LIQUIDVIBES FULFILLMENT SERVER - WITH CUSTOM BUNDLE SELECTION
+// Save this as: server.js (replace your entire server.js with this)
 
 const express = require('express');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
@@ -7,20 +7,24 @@ const nodemailer = require('nodemailer');
 const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 10000; // Render uses port 10000
+const PORT = process.env.PORT || 10000;
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: '*', // Allow all origins for testing
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'stripe-signature']
+}));
 app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
-// Keep server awake (prevent Render free tier sleeping)
+// Keep server awake
 setInterval(() => {
   console.log('🔄 Keeping server active...');
-}, 14 * 60 * 1000); // Every 14 minutes
+}, 14 * 60 * 1000);
 
-// Email transporter (FIXED: createTransport not createTransporter)
-const transporter = nodemailer.createTransport({
+// Email transporter
+const transporter = nodemailer.createTransporter({
   service: 'gmail',
   auth: {
     user: process.env.GMAIL_USER,
@@ -28,13 +32,77 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+// Store for custom bundle selections (in production, use a database)
+const bundleSelections = new Map();
+
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
     status: 'LiquidVibes FREE Fulfillment Server Running! 🆓',
     timestamp: new Date().toISOString(),
-    tier: 'Free - Render.com'
+    tier: 'Free - Render.com',
+    selections: bundleSelections.size
   });
+});
+
+// NEW: Endpoint to save bundle selections
+app.post('/save-selection', (req, res) => {
+  try {
+    const { sessionId, selections, type } = req.body;
+    
+    if (!sessionId || !selections || !type) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    // Store the selection with a temporary key
+    const selectionKey = `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    bundleSelections.set(selectionKey, {
+      selections,
+      type,
+      timestamp: new Date(),
+      sessionId
+    });
+    
+    console.log(`💾 Saved ${type} selection:`, selections);
+    
+    res.json({ 
+      success: true, 
+      selectionKey,
+      message: 'Selection saved successfully' 
+    });
+    
+  } catch (error) {
+    console.error('❌ Error saving selection:', error);
+    res.status(500).json({ error: 'Failed to save selection' });
+  }
+});
+
+// NEW: Endpoint to get available files
+app.get('/files/:type', (req, res) => {
+  const type = req.params.type;
+  
+  const fileMap = {
+    images: {
+      '1.png': '1NP2kWc03vozTlxWneaInrGIZo9XmEMUn',
+      '2.png': '15QZUobKAfaOtRgIU7nTH-aYQIE19Qw9q',
+      '3.png': '1wCuBXHbBgwzMBIliyPeOYtj18nl1ZTsL',
+      '4.png': '1pFANqrEiLmMULrcqSKZidku-BaDliOTl',
+      '5.png': '1QVfp-ENDpgfBy9dTx8tLRDIaa5FIjym_',
+      '6.png': '1kJZ_NxFDvtpP8MLaEsc2jeLrJMcoUWXm',
+      '7.png': '18fvjsf_VeVMjWzGcMj1XwGoXQWW_m4_l',
+      '8.png': '12mWxSHu8t7l3Is1z1G_0-D1VzYdQaKnk',
+      '9.png': '17yAz-W0o3vWWIB-a72pyIYAaduZSlxoo',
+      '10.png': '1z-WGL792vfo_jiNzjdktvM9sJtrJrSic'
+    },
+    videos: {
+      '1.mp4': '1MqwU9kcoGJgCNw7Xaqr-RDwKZgz56mYy',
+      '2.mp4': '1o2L5MSK53adayK4v_86Vv-DjaVCm-Wll',
+      '3.mp4': '1c9juFIsWrlUSCEMPzlqb306Jsi2P_I9E',
+      '4.mp4': '1OSUMX0XL-BgttCtEZVlGo7YM7zOW94Hp'
+    }
+  };
+  
+  res.json(fileMap[type] || {});
 });
 
 // Webhook endpoint
@@ -72,7 +140,18 @@ async function fulfillOrder(session) {
 
     console.log(`🎨 Processing order for: ${customerEmail}, Amount: $${amount/100}`);
 
-    let productInfo = getProductInfo(amount);
+    // Check if this is a custom bundle by looking for stored selections
+    const customSelection = findCustomSelection(sessionId, amount);
+    
+    let productInfo;
+    
+    if (customSelection) {
+      productInfo = createCustomProductInfo(customSelection, amount);
+      // Clean up the stored selection
+      bundleSelections.delete(customSelection.key);
+    } else {
+      productInfo = getProductInfo(amount);
+    }
     
     if (!productInfo) {
       console.error('❌ Unknown product amount:', amount);
@@ -87,117 +166,109 @@ async function fulfillOrder(session) {
   }
 }
 
-// Product configuration (using free Google Drive)
+// NEW: Find custom selection for this payment
+function findCustomSelection(sessionId, amount) {
+  const now = new Date();
+  const oneHourAgo = new Date(now - 60 * 60 * 1000); // 1 hour timeout
+  
+  for (const [key, selection] of bundleSelections.entries()) {
+    // Match by amount and recent timestamp (within 1 hour)
+    const isImageBundle = amount === 900 && selection.type === 'image';
+    const isVideoBundle = amount === 1500 && selection.type === 'video';
+    const isRecent = selection.timestamp > oneHourAgo;
+    
+    if ((isImageBundle || isVideoBundle) && isRecent) {
+      return { ...selection, key };
+    }
+  }
+  
+  return null;
+}
+
+// NEW: Create product info for custom selections
+function createCustomProductInfo(customSelection, amount) {
+  const { selections, type } = customSelection;
+  const isImage = type === 'image';
+  
+  const fileMap = {
+    '1.png': '1NP2kWc03vozTlxWneaInrGIZo9XmEMUn',
+    '2.png': '15QZUobKAfaOtRgIU7nTH-aYQIE19Qw9q',
+    '3.png': '1wCuBXHbBgwzMBIliyPeOYtj18nl1ZTsL',
+    '4.png': '1pFANqrEiLmMULrcqSKZidku-BaDliOTl',
+    '5.png': '1QVfp-ENDpgfBy9dTx8tLRDIaa5FIjym_',
+    '6.png': '1kJZ_NxFDvtpP8MLaEsc2jeLrJMcoUWXm',
+    '7.png': '18fvjsf_VeVMjWzGcMj1XwGoXQWW_m4_l',
+    '8.png': '12mWxSHu8t7l3Is1z1G_0-D1VzYdQaKnk',
+    '9.png': '17yAz-W0o3vWWIB-a72pyIYAaduZSlxoo',
+    '10.png': '1z-WGL792vfo_jiNzjdktvM9sJtrJrSic',
+    '1.mp4': '1MqwU9kcoGJgCNw7Xaqr-RDwKZgz56mYy',
+    '2.mp4': '1o2L5MSK53adayK4v_86Vv-DjaVCm-Wll',
+    '3.mp4': '1c9juFIsWrlUSCEMPzlqb306Jsi2P_I9E',
+    '4.mp4': '1OSUMX0XL-BgttCtEZVlGo7YM7zOW94Hp'
+  };
+  
+  const downloads = selections.map(item => {
+    const fileId = fileMap[item.filename];
+    return {
+      name: item.name,
+      url: `https://drive.google.com/uc?export=download&id=${fileId}`,
+      description: `High quality ${isImage ? 'image' : 'video'} download`
+    };
+  });
+  
+  // Add license
+  downloads.push({
+    name: 'Commercial License',
+    url: 'https://drive.google.com/uc?export=download&id=1oFlNndenosC5aiPKvHxg8e9XjoDhTLCA',
+    description: `Full commercial usage rights for all ${type}s`
+  });
+  
+  return {
+    type: `custom_${type}_bundle`,
+    name: `Custom ${isImage ? 'Image' : 'Video'} Bundle`,
+    description: `Your selected ${selections.length} ${isImage ? 'images' : 'videos'} with commercial license`,
+    downloads
+  };
+}
+
+// 🎨🎬 STANDARD PRODUCT CONFIGURATION
 function getProductInfo(amountInCents) {
   const products = {
-    300: { // $3.00 - Single Image
+    
+    // 🎨 $3.00 - Single Image
+    300: {
       type: 'single_image',
       name: 'Premium AI Image',
-      description: 'High-resolution AI-generated artwork',
+      description: 'High-resolution AI-generated artwork with commercial license',
       downloads: [
         {
           name: 'High Resolution Image (8K)',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_SINGLE_IMAGE_FILE_ID',
-          description: 'Ultra-high quality 8000x8000px image'
+          url: 'https://drive.google.com/uc?export=download&id=1NP2kWc03vozTlxWneaInrGIZo9XmEMUn',
+          description: 'Ultra-high quality artwork'
         },
         {
           name: 'Commercial License',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_LICENSE_FILE_ID',
+          url: 'https://drive.google.com/uc?export=download&id=1oFlNndenosC5aiPKvHxg8e9XjoDhTLCA',
           description: 'Full commercial usage rights'
         }
       ]
     },
     
-    500: { // $5.00 - Single Video
+    // 🎬 $5.00 - Single Video
+    500: {
       type: 'single_video',
       name: 'Premium AI Video',
-      description: 'High-quality AI motion graphics',
+      description: 'High-quality AI motion graphics with commercial license',
       downloads: [
         {
           name: 'High Quality Video (4K)',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_SINGLE_VIDEO_FILE_ID',
+          url: 'https://drive.google.com/uc?export=download&id=1MqwU9kcoGJgCNw7Xaqr-RDwKZgz56mYy',
           description: '4K resolution, loop-ready format'
         },
         {
           name: 'Commercial License',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_LICENSE_FILE_ID',
+          url: 'https://drive.google.com/uc?export=download&id=1oFlNndenosC5aiPKvHxg8e9XjoDhTLCA',
           description: 'Full commercial usage rights'
-        }
-      ]
-    },
-    
-    900: { // $9.00 - Image Bundle  
-      type: 'image_bundle',
-      name: '4 Premium AI Images Bundle',
-      description: 'Custom selection of 4 high-resolution artworks',
-      downloads: [
-        {
-          name: 'Complete Image Bundle',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_IMAGE_BUNDLE_FILE_ID',
-          description: 'All 4 selected images in one download'
-        },
-        {
-          name: 'Image 1 - Ice Phoenix',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_IMAGE1_FILE_ID',
-          description: 'High-res individual download'
-        },
-        {
-          name: 'Image 2 - Stained Glass Dragon',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_IMAGE2_FILE_ID',
-          description: 'High-res individual download'
-        },
-        {
-          name: 'Image 3 - Enchanted Cottage',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_IMAGE3_FILE_ID',
-          description: 'High-res individual download'
-        },
-        {
-          name: 'Image 4 - Crystal Palace',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_IMAGE4_FILE_ID',
-          description: 'High-res individual download'
-        },
-        {
-          name: 'Commercial License',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_LICENSE_FILE_ID',
-          description: 'Full commercial usage rights for all images'
-        }
-      ]
-    },
-    
-    1500: { // $15.00 - Video Bundle
-      type: 'video_bundle',
-      name: '4 Premium AI Videos Bundle',
-      description: 'Custom selection of 4 high-quality motion graphics',
-      downloads: [
-        {
-          name: 'Complete Video Bundle',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_VIDEO_BUNDLE_FILE_ID',
-          description: 'All 4 selected videos in one download'
-        },
-        {
-          name: 'Video 1 - Anger Animation',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_VIDEO1_FILE_ID',
-          description: '4K download of first video'
-        },
-        {
-          name: 'Video 2 - Eye Motion',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_VIDEO2_FILE_ID',
-          description: '4K download of second video'
-        },
-        {
-          name: 'Video 3 - Fire Effect',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_VIDEO3_FILE_ID',
-          description: '4K download of third video'
-        },
-        {
-          name: 'Video 4 - Serf Animation',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_VIDEO4_FILE_ID',
-          description: '4K download of fourth video'
-        },
-        {
-          name: 'Commercial License',
-          url: 'https://drive.google.com/uc?export=download&id=YOUR_LICENSE_FILE_ID',
-          description: 'Full commercial usage rights for all videos'
         }
       ]
     }
@@ -258,21 +329,13 @@ async function sendFulfillmentEmail(email, name, productInfo, orderId) {
               ${downloadLinksHtml}
             </table>
 
-            <div style="background: #d4edda; border: 1px solid #c3e6cb; border-radius: 10px; padding: 20px; margin: 30px 0;">
-              <h4 style="margin: 0 0 10px; color: #155724;">🆓 100% Free Fulfillment System!</h4>
-              <ul style="margin: 0; padding-left: 20px; color: #155724;">
-                <li>This email was sent by our <strong>free automated system</strong></li>
-                <li>Zero overhead costs means better prices for you!</li>
-                <li>Professional service without the premium price tag</li>
-              </ul>
-            </div>
-
             <div style="background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 10px; padding: 20px; margin: 30px 0;">
               <h4 style="margin: 0 0 10px; color: #856404;">⚠️ Important Information</h4>
               <ul style="margin: 0; padding-left: 20px; color: #856404;">
                 <li>Download links are valid for <strong>30 days</strong></li>
-                <li>All images are <strong>8K resolution</strong> with full commercial rights</li>
+                <li>All images are <strong>ultra-high resolution</strong> with full commercial rights</li>
                 <li>Videos are <strong>4K quality</strong> in loop-ready format</li>
+                <li>Perfect for print, digital, and commercial projects</li>
                 <li>Save files to your device immediately after download</li>
               </ul>
             </div>
@@ -287,7 +350,7 @@ async function sendFulfillmentEmail(email, name, productInfo, orderId) {
             
             <div style="text-align: center; color: #666;">
               <p>Need help? Reply to this email or contact us at <a href="mailto:support@liquidvibes.com" style="color: #00d4ff;">support@liquidvibes.com</a></p>
-              <p style="font-size: 0.9rem;">© 2024 LiquidVibes Studio - Free Automated Fulfillment System</p>
+              <p style="font-size: 0.9rem;">© 2024 LiquidVibes Studio - Premium AI Art & Automated Fulfillment</p>
             </div>
           </div>
         </div>
@@ -306,4 +369,6 @@ app.listen(PORT, () => {
   console.log(`💳 Stripe configured: ${process.env.STRIPE_SECRET_KEY ? '✅' : '❌'}`);
   console.log(`🔗 Webhook secret configured: ${process.env.STRIPE_WEBHOOK_SECRET ? '✅' : '❌'}`);
   console.log(`🆓 Running on FREE tier - Render.com`);
+  console.log(`🎨 Custom bundle selections enabled ✅`);
+  console.log(`📄 License PDF configured: 1oFlNndenosC5aiPKvHxg8e9XjoDhTLCA ✅`);
 });
